@@ -1,0 +1,260 @@
+---
+title: "nfl-analysis"
+author: "Lucas Paiva"
+date: "2024-02-11"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Let's work a little bit with NFL data from the nflfastR package in CRAN.
+
+```{r libraries, warning=FALSE, message=FALSE}
+#Libraries:
+library(dplyr)
+library(ggplot2)
+library(nflfastR)
+```
+
+We need to upload the available NFL Data.
+
+```{r up_data, warning=FALSE, message=FALSE}
+#Uploading NFL Data:
+#Play by Play Data:
+data_pbp_2022 = load_pbp(season = 2022)
+head(data_pbp_2022, 5)
+
+#Players Stats:
+data_players_stats = load_player_stats(season = 2022)
+head(data_players_stats, 5)
+```
+
+So, we got a lot of data available of the 2022 NFL Season, I loaded to dataframes into R from the package repository:
+
+-   *data_pbp_2022* = play by play data from all 2022 NFL's Games from all teams
+-   *data_players_stats* = players stats from all weeks
+
+With this data we can look into some stuff that can help us understand what are the realy good teams and players, also I want to see if some of my favorites players are playing well and if they are corresponding my expectations.
+
+After loading the data, since we got so many variables, especially in the play by play data, we need to see what are the columns that helps us out to reach our goal, so we can use the field descriptions available from the nflfastR to chose the columns we want.
+
+```{r field, warning=FALSE, message=FALSE}
+#Fields Descriptions:
+field_descriptions |> 
+  mutate(print_string = paste(Field, Description, sep = ": ")) |> 
+  select(Field, print_string) 
+```
+
+To chose the columns I want, I concatenated the field name and descriptions and clipped this to a simple sheet (Excel, LibreOffice, Google Sheets..) and started to check the columns I wanted, after I checked I the columns we just need to clip back to R and select only the fields we want.
+
+```{r selected_fieds}
+#Selecting fields we want:
+data_pbp_2022_sel_fieds = data_pbp_2022 |> 
+  select(play_id,
+game_id,
+home_team,
+away_team,
+season_type,
+week,
+posteam,
+defteam,
+game_date,
+drive,
+sp,
+qtr,
+down,
+yrdln,
+desc,
+play_type,
+qb_dropback,
+qb_scramble,
+pass_length,
+pass_location,
+air_yards,
+rushing_yards,
+yards_after_catch,
+td_team,
+td_player_name,
+posteam_score,
+defteam_score,
+penalty,
+epa,
+total_home_epa,
+total_away_epa,
+total_home_rush_epa,
+total_away_rush_epa,
+total_home_pass_epa,
+total_away_pass_epa,
+first_down_rush,
+first_down_pass,
+first_down_penalty,
+third_down_converted,
+third_down_failed,
+fourth_down_converted,
+fourth_down_failed,
+away_score,
+home_score,
+location,
+result,
+spread_line,
+passer_id
+)
+```
+
+So, from 372 available columns we selected 45 to beggin with. Now, we need to see the classes of this variables.
+
+```{r data_types}
+str(data_pbp_2022_sel_fieds)
+```
+
+Since we have play by play data, this dataset has a lot of NA values, because some columns only apply to specific plays, example, the *air_yards* variable will only have values when the play is a pass from the possession team.
+
+Here, we need to create our dataframes using this available data, we don't have a organized dataset with the teams statistics by week and etc, therefore, we need to do some cleaning and aggregation steps. But since we have offensive and defensive plays in the same datasets, we need to orient our data handling to the visuals we want to create, so lets work on it.
+
+### How are the Teams Tiers by Winning Pctg?
+
+```{r organizing_data, warning=FALSE, message=FALSE, fig.align='center', fig.height=6, fig.width=10}
+#Creating our wins dataframe by week:
+df_wins = data_pbp_2022_sel_fieds |> 
+  select(game_id, home_team, away_team, week, result) |> unique() |> 
+  mutate(win = if_else(result <= 0, 0, 1)) #Creating a Win flag
+
+#Adjusting to calculate all wins for all teams:
+df_wins_adj = rbind(#Home Teams Wins:
+      df_wins |> 
+        select(game_id, home_team, result, win) |> 
+        rename(team_abbr = home_team),
+      #Away Teams Wins:
+      df_wins |> 
+        select(game_id, away_team, result, win) |> 
+        rename(team_abbr = away_team) |> 
+        mutate(win = abs(win - 1))
+      ) 
+
+#Plotting:
+asp_ratio <- 1.618 
+
+df_wins_adj |> 
+  inner_join(select(teams_colors_logos, team_name, team_abbr, team_logo_espn), by = "team_abbr") |> 
+  group_by(team_logo_espn, team_abbr, team_name) |> 
+  summarise("Games Played" = n(),
+            "% Win" = sum(win)/n()) |> 
+  ##ggplot part:
+  ggplot(aes(x = reorder(team_name, -`% Win`), y = `% Win`)) + 
+  geom_bar(stat = "identity", alpha = 0.8, col = "black") +
+  ggimage::geom_image(aes(image = team_logo_espn),
+                      size = 0.05, by = "width", asp = asp_ratio) +
+  scale_y_continuous(labels = scales::percent) + 
+  theme_classic() + 
+  theme(axis.text.x = element_blank(),
+        aspect.ratio = 1/asp_ratio) +
+  labs(x = "Teams", y = "Winning Percentage",
+       title = "Winning Percentage by Team Throught 8 Weeks")
+```
+
+### Offensive and Defensive EPA
+
+EPA is a very good measure for evaluating how good the teams units are playing.
+
+```{r epa_stats, warning=FALSE, message=FALSE, fig.align='center', fig.height=6, fig.width=10}
+#Off and Def EPA per Play:
+data_pbp_2022_sel_fieds |> 
+  select(game_id, play_id, posteam, defteam, week, epa) |> 
+  na.omit() |> 
+  tidyr::pivot_longer(c("posteam", "defteam"), names_to = "unit", values_to = "team_abbr") |> 
+  mutate(unit = factor(unit, levels = c("posteam", "defteam"), labels = c("offense", "defense"))) |> 
+  group_by(team_abbr, unit) |> summarise(avg_epa = mean(epa)) |> ungroup() |> 
+  tidyr::spread(unit, avg_epa) |> 
+  inner_join(select(teams_colors_logos, team_name, team_abbr, team_logo_espn), by = "team_abbr") |> 
+  ##ggplot aprt:
+  ggplot(aes(x = offense, y = defense)) + 
+  geom_point(col = "white") + 
+  ggimage::geom_image(aes(image = team_logo_espn),
+                      size = 0.05, by = "width", asp = asp_ratio) + 
+  theme_classic() + 
+  labs(x = "EPA/Play (Offense)",
+       y = "EPA/Play (Defense)",
+       title = "EPA by Team")
+```
+
+### Play Selection Around the League
+
+Here we got evaluate the play selection by each down and after we can look into it by each team.
+
+```{r plays_selection, warning=FALSE, message=FALSE, fig.align='center', fig.height=6, fig.width=12}
+#Plays Types in the dataset:
+df_plays = data_pbp_2022_sel_fieds |> 
+  filter(down %in% c(1, 2, 3) & penalty == 0) |> 
+  select(game_id, posteam, play_type, down, week) |> 
+  group_by(posteam, play_type) |> summarise(n = n()) |> mutate(freq = n/sum(n)) |> 
+  select(-n) |> filter(play_type %in% c("run", "pass")) |> 
+  arrange(play_type, desc(freq)) |> group_by(play_type) |> 
+  mutate(id = if_else(play_type == "pass", row_number(), NULL)) |> ungroup() |> 
+  group_by(posteam) |> mutate(id = sum(id, na.rm = T)) #This part is just to order the axis by the play type category
+  
+
+##ggplot part:
+df_plays |> 
+  ggplot(aes(x = reorder(posteam, id), y = freq, fill = play_type, label = round(freq*100, 0))) + 
+  geom_bar(stat = "identity", col = "black") + 
+  theme_classic() +
+  geom_text(position = position_stack(vjust = .5)) + 
+  theme(axis.text.x = element_text(angle = 45, colour = "black"),
+        legend.position = "top") + 
+  scale_y_continuous(labels = scales::percent) + 
+  labs(x = "Team", 
+       y = "Play Selection Percentage",
+       title = "Play Selection by Team",
+       subtitle = "Distribution of plays by each team ordered by the most pass centred offense to the least one on 3 Downs")
+```
+
+### Air Yards versus Rush Yards per Play
+
+```{r yards_visual, warning=FALSE, message=FALSE, fig.align='center', fig.height=6, fig.width=12}
+data_pbp_2022_sel_fieds |> 
+  select(game_id, play_id, posteam, air_yards, rushing_yards, play_type, penalty) |> 
+  filter(!is.na(play_type) & play_type %in% c("run", "pass")) |> 
+  group_by(posteam) |> summarise(avg_air = mean(air_yards, na.rm = T),
+                                 avg_rush = mean(rushing_yards, na.rm = T)) |> 
+  rename(team_abbr = posteam) |> 
+  inner_join(select(teams_colors_logos, team_name, team_abbr, team_logo_espn), by = "team_abbr") |> 
+  ggplot(aes(x = avg_air, y = avg_rush)) + 
+  geom_point(col = "white") + 
+  ggimage::geom_image(aes(image = team_logo_espn),
+                      size = 0.05, by = "width", asp = asp_ratio) + 
+  theme_classic() + 
+  labs(x = "Air Yards per Play",
+       y = "Rush Yards per Play",
+       title = "Air Yards versus Rush Yards per Play by Team")
+```
+
+### Play Selection and Field Position
+
+For this one some manipulations have to be done.
+
+```{r fields_plays, warning=FALSE, message=FALSE, fig.align='center', fig.height=10, fig.width=12}
+`%!in%` = Negate(`%in%`)
+df_fields_plays_downs = data_pbp_2022_sel_fieds |> 
+  select(play_id, game_id, posteam, yrdln, play_type, down) |> 
+  filter(!is.na(play_type) & play_type %!in% c("no_play", "kickoff", "extra_point") & !is.na(down)) |> 
+  mutate(adj_play = forcats::fct_lump_n(play_type, n = 4, ties.method = "first", other_level = "Others Plays"), #Plays "Irrelevants" won't mather
+         field_position_num = if_else(stringr::word(yrdln, 1) == posteam, as.numeric(paste0("-", stringr::word(yrdln, 2))), as.numeric(stringr::word(yrdln, 2))),
+         field_position_cat = case_when(field_position_num <= -30 ~ "Own 20",
+                                        field_position_num > -30 & field_position_num <= 0 ~ "Defensive Field > 20 Yrds",
+                                        field_position_num > 0 & field_position_num <= 30 ~ "Offensive Field - Not Red Zone",
+                                        T ~  "Red Zone"), #Creating categories for field position
+         field_position_cat = factor(field_position_cat, levels = c("Own 20", "Defensive Field > 20 Yrds", "Offensive Field - Not Red Zone", "Red Zone")))  
+#Aggregation Part:
+stats_fields_plays = df_fields_plays_downs |> 
+  group_by(posteam, field_position_cat, adj_play) |> 
+  summarise(n = n()) |> mutate(freq = n/sum(n)) |> select(-n) |> 
+  tidyr::spread(adj_play, freq)
+stats_fields_plays[is.na(stats_fields_plays)] = 0
+stats_fields_plays |> ungroup() |> 
+  inner_join(select(teams_colors_logos, team_abbr, team_name), by = c("posteam" = "team_abbr")) |> select(-posteam) |> 
+  select(team_name, field_position_cat, pass, run, field_goal, punt, `Others Plays`) |> 
+  mutate_if(is.double, scales::percent, accuracy = 0.1) |> 
+  knitr::kable(align = "c")
+```
